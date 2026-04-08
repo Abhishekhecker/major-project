@@ -428,30 +428,43 @@ elif page == "🔮  Prediction Dashboard":
                 ["M", "L", "H"],
                 help="M = Medium, L = Low, H = High quality variant",
             )
-            air_temp = st.slider(
-                "Air Temperature (K)", 295.0, 305.0, 300.0, step=0.1,
+            air_temp = st.number_input(
+                "Air Temperature (K)",
+                value=300.0,
+                step=0.1,
+                format="%.2f",
                 help="Ambient air temperature in Kelvin",
             )
-            proc_temp = st.slider(
-                "Process Temperature (K)", 305.0, 315.0, 310.0, step=0.1,
+            proc_temp = st.number_input(
+                "Process Temperature (K)",
+                value=310.0,
+                step=0.1,
+                format="%.2f",
                 help="Process temperature in Kelvin",
             )
 
         with col2:
             st.markdown("**⚡ Motor Parameters**")
-            rpm = st.slider(
-                "Rotational Speed (RPM)", 1000, 2800, 1500, step=10,
+            rpm = st.number_input(
+                "Rotational Speed (RPM)",
+                value=1500,
+                step=1,
                 help="Motor rotational speed",
             )
-            torque = st.slider(
-                "Torque (Nm)", 3.0, 80.0, 40.0, step=0.5,
+            torque = st.number_input(
+                "Torque (Nm)",
+                value=40.0,
+                step=0.1,
+                format="%.2f",
                 help="Shaft torque in Newton-metres",
             )
 
         with col3:
             st.markdown("**🔧 Tool Condition**")
-            tool_wear = st.slider(
-                "Tool Wear (min)", 0, 250, 100, step=1,
+            tool_wear = st.number_input(
+                "Tool Wear (min)",
+                value=100,
+                step=1,
                 help="Cumulative tool wear time in minutes",
             )
             st.markdown("<br>", unsafe_allow_html=True)
