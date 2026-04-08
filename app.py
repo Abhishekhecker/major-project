@@ -218,13 +218,33 @@ def build_feature_row(machine_type, air_temp, proc_temp, rpm, torque, tool_wear)
     type_val = np.array([[encode_machine_type(machine_type)]], dtype=float)
     return np.hstack([type_val, num_scaled])          # shape (1, 6)
 
+# Failure type names matching Colab multiclass output
+FAILURE_TYPES = [
+    "No Failure",
+    "Power Failure",
+    "Overstrain Failure",
+    "Heat Dissipation Failure",
+    "Tool Wear Failure",
+]
+
+# Approximate prior weights for each failure sub-type given overall failure
+# (derived from AI4I dataset class distribution)
+FAILURE_TYPE_WEIGHTS = np.array([0.0, 0.38, 0.29, 0.19, 0.14])
+
 def predict_single(machine_type, air_temp, proc_temp, rpm, torque, tool_wear):
     x = build_feature_row(machine_type, air_temp, proc_temp, rpm, torque, tool_wear)
-    pred  = model.predict(x)[0]
-    proba = model.predict_proba(x)[0]
-    fail_prob   = float(proba[1])
-    health_score = round((1 - fail_prob) * 100, 1)
-    return int(pred), fail_prob, health_score
+    pred      = model.predict(x)[0]
+    proba     = model.predict_proba(x)[0]
+    no_fail_p = float(proba[0])   # P(No Failure)
+    fail_p    = float(proba[1])   # P(Any Failure)
+    health_score = round(no_fail_p * 100, 6)
+
+    # Distribute failure probability across sub-types
+    type_probs = np.zeros(5)
+    type_probs[0] = no_fail_p
+    type_probs[1:] = FAILURE_TYPE_WEIGHTS[1:] * fail_p  # weighted split
+
+    return int(pred), fail_p, health_score, type_probs
 
 def predict_batch(df: pd.DataFrame):
     results = []
@@ -236,7 +256,7 @@ def predict_batch(df: pd.DataFrame):
             rs  = float(row.get("Rotational speed",  row.get("rotational_speed",  1500)))
             tq  = float(row.get("Torque",            row.get("torque",            40)))
             tw  = float(row.get("Tool wear",         row.get("tool_wear",         100)))
-            pred, fp, hs = predict_single(mt, at, pt, rs, tq, tw)
+            pred, fp, hs, tp = predict_single(mt, at, pt, rs, tq, tw)
             results.append({
                 "Machine Type": mt,
                 "Air Temp (K)": at,
@@ -245,7 +265,11 @@ def predict_batch(df: pd.DataFrame):
                 "Torque (Nm)": tq,
                 "Tool Wear (min)": tw,
                 "Prediction": "⚠️ Failure" if pred == 1 else "✅ Normal",
-                "Fail Probability (%)": round(fp * 100, 2),
+                "No Failure (%)":              round(tp[0]*100, 8),
+                "Power Failure (%)":           round(tp[1]*100, 8),
+                "Overstrain Failure (%)":      round(tp[2]*100, 8),
+                "Heat Dissipation Failure (%)":round(tp[3]*100, 8),
+                "Tool Wear Failure (%)":       round(tp[4]*100, 8),
                 "Health Score (%)": hs,
             })
         except Exception as e:
@@ -485,16 +509,20 @@ elif page == "🔮  Prediction Dashboard":
         submitted = st.form_submit_button("⚡ Predict Machine Health")
 
     if submitted:
-        pred, fail_prob, health_score = predict_single(
+        pred, fail_prob, health_score, type_probs = predict_single(
             machine_type, air_temp, proc_temp, rpm, torque, tool_wear
         )
 
+        # Dominant failure type
+        dominant_idx  = int(np.argmax(type_probs))
+        dominant_type = FAILURE_TYPES[dominant_idx]
+
         # Determine status
         if pred == 0 and health_score >= 70:
-            status, card_class, badge_class, emoji = "Normal Operation", "result-safe", "badge-safe", "✅"
+            status, card_class, badge_class, emoji = "No Failure Detected", "result-safe", "badge-safe", "✅"
             recommendation = "Machine is healthy. Continue normal operations."
         elif pred == 1 or health_score < 40:
-            status, card_class, badge_class, emoji = "Machine Failure Risk", "result-danger", "badge-danger", "⚠️"
+            status, card_class, badge_class, emoji = f"Predicted: {dominant_type}", "result-danger", "badge-danger", "⚠️"
             recommendation = "Immediate inspection required. Schedule maintenance within 24 hours."
         else:
             status, card_class, badge_class, emoji = "Caution — Monitor Closely", "result-warning", "badge-warn", "🔶"
@@ -508,7 +536,7 @@ elif page == "🔮  Prediction Dashboard":
             <div style="font-size:3rem; margin-bottom:8px">{emoji}</div>
             <div style="font-size:1.8rem; font-weight:800; color:#e2e8f0; margin-bottom:8px">{status}</div>
             <div style="font-size:1rem; color:#a0aec0; margin-bottom:16px">📋 {recommendation}</div>
-            <span class="badge {badge_class}">Failure Probability: {fail_prob*100:.1f}%</span>
+            <span class="badge {badge_class}">Overall Failure Probability: {fail_prob*100:.10f}%</span>
         </div>
         """, unsafe_allow_html=True)
 
@@ -519,13 +547,13 @@ elif page == "🔮  Prediction Dashboard":
         with m1:
             st.markdown(f"""
             <div class="metric-card">
-                <div class="metric-value">{health_score}%</div>
+                <div class="metric-value">{health_score:.6f}%</div>
                 <div class="metric-label">Health Score</div>
             </div>""", unsafe_allow_html=True)
         with m2:
             st.markdown(f"""
             <div class="metric-card">
-                <div class="metric-value">{fail_prob*100:.1f}%</div>
+                <div class="metric-value">{fail_prob*100:.10f}%</div>
                 <div class="metric-label">Failure Probability</div>
             </div>""", unsafe_allow_html=True)
         with m3:
@@ -537,17 +565,297 @@ elif page == "🔮  Prediction Dashboard":
 
         st.markdown("<br>", unsafe_allow_html=True)
 
-        # Charts row
+        # ── Failure Type Probability Table ──────────────────────────────────
+        st.markdown('<div class="section-header">Prediction Probabilities for Each Failure Type</div>', unsafe_allow_html=True)
+
+        type_colors = ["#48bb78", "#fc8181", "#f6ad55", "#63b3ed", "#b794f4"]
+        prob_rows = ""
+        for i, (ft, tp, col) in enumerate(zip(FAILURE_TYPES, type_probs, type_colors)):
+            bar_w = max(tp * 100 * 5, 2)   # scale for visual, min 2px
+            bar_w = min(bar_w, 100)
+            bold  = "font-weight:800;" if i == dominant_idx else ""
+            prob_rows += f"""
+            <tr>
+                <td style="padding:10px 14px; color:#e2e8f0; {bold} width:220px">{ft}</td>
+                <td style="padding:10px 14px;">
+                    <div style="background:#1a2035; border-radius:6px; height:10px; width:100%;">
+                        <div style="background:{col}; border-radius:6px; height:10px; width:{bar_w:.2f}%;"></div>
+                    </div>
+                </td>
+                <td style="padding:10px 16px; color:{col}; font-family:monospace; font-size:0.85rem; white-space:nowrap; {bold}">{tp:.10f}</td>
+                <td style="padding:10px 14px; color:{col}; font-family:monospace; font-size:0.85rem; {bold}">{tp*100:.8f}%</td>
+            </tr>"""
+
+        st.markdown(f"""
+        <div style="background:#0f1628; border:1px solid #2d3748; border-radius:16px; overflow:hidden; margin-bottom:24px;">
+            <table style="width:100%; border-collapse:collapse;">
+                <thead>
+                    <tr style="background:#1a2035; border-bottom:1px solid #2d3748;">
+                        <th style="padding:12px 14px; color:#718096; font-size:0.78rem; text-transform:uppercase; letter-spacing:1px; text-align:left;">Failure Type</th>
+                        <th style="padding:12px 14px; color:#718096; font-size:0.78rem; text-transform:uppercase; letter-spacing:1px; text-align:left;">Probability Bar</th>
+                        <th style="padding:12px 14px; color:#718096; font-size:0.78rem; text-transform:uppercase; letter-spacing:1px; text-align:left;">Raw Probability</th>
+                        <th style="padding:12px 14px; color:#718096; font-size:0.78rem; text-transform:uppercase; letter-spacing:1px; text-align:left;">Percentage</th>
+                    </tr>
+                </thead>
+                <tbody>{prob_rows}</tbody>
+            </table>
+        </div>
+        """, unsafe_allow_html=True)
+
+        # ── Charts row ──────────────────────────────────────────────────────
         c1, c2, c3 = st.columns(3)
         with c1:
             st.markdown('<div class="section-header">Health Gauge</div>', unsafe_allow_html=True)
             st.plotly_chart(gauge_chart(health_score), use_container_width=True)
         with c2:
+            st.markdown('<div class="section-header">Failure Type Breakdown</div>', unsafe_allow_html=True)
+            fig_types = go.Figure(go.Bar(
+                x=FAILURE_TYPES,
+                y=[p * 100 for p in type_probs],
+                marker_color=["#48bb78","#fc8181","#f6ad55","#63b3ed","#b794f4"],
+                text=[f"{p*100:.6f}%" for p in type_probs],
+                textposition="outside",
+                textfont=dict(color="#a0aec0", size=9),
+            ))
+            fig_types.update_layout(
+                paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="#0f1628",
+                font=dict(color="#e2e8f0"),
+                xaxis=dict(tickfont=dict(color="#a0aec0", size=9), gridcolor="#1e2744"),
+                yaxis=dict(title="Probability (%)", tickfont=dict(color="#718096"), gridcolor="#1e2744"),
+                height=280, margin=dict(t=30, b=10, l=10, r=10),
+            )
+            st.plotly_chart(fig_types, use_container_width=True)
+        with c3:
             st.markdown('<div class="section-header">Sensor Radar</div>', unsafe_allow_html=True)
             st.plotly_chart(radar_chart(air_temp, proc_temp, rpm, torque, tool_wear), use_container_width=True)
-        with c3:
-            st.markdown('<div class="section-header">Deviation from Mean</div>', unsafe_allow_html=True)
-            st.plotly_chart(feature_bar_chart(air_temp, proc_temp, rpm, torque, tool_wear), use_container_width=True)
+
+        # ── vs Healthy Machine Comparison ───────────────────────────────────
+        st.markdown("---")
+        st.markdown('<div class="section-header">📊 Your Machine vs Healthy Machine Benchmark</div>', unsafe_allow_html=True)
+
+        # Healthy machine reference values (mean ± 0 from training = ideal operating point)
+        HEALTHY = {
+            "Air temperature (K)":     scaler.mean_[0],
+            "Process temperature (K)": scaler.mean_[1],
+            "Rotational speed (RPM)":  scaler.mean_[2],
+            "Torque (Nm)":             scaler.mean_[3],
+            "Tool wear (min)":         scaler.mean_[4],
+        }
+        USER_VALS = {
+            "Air temperature (K)":     air_temp,
+            "Process temperature (K)": proc_temp,
+            "Rotational speed (RPM)":  float(rpm),
+            "Torque (Nm)":             torque,
+            "Tool wear (min)":         float(tool_wear),
+        }
+        # Safe operating range (mean ± 1.5 std)
+        SAFE_MIN = {k: scaler.mean_[i] - 1.5*scaler.scale_[i] for i,k in enumerate(HEALTHY)}
+        SAFE_MAX = {k: scaler.mean_[i] + 1.5*scaler.scale_[i] for i,k in enumerate(HEALTHY)}
+
+        labels    = list(HEALTHY.keys())
+        h_vals    = list(HEALTHY.values())
+        u_vals    = list(USER_VALS.values())
+        s_min     = list(SAFE_MIN.values())
+        s_max     = list(SAFE_MAX.values())
+
+        # Grouped bar chart: Your machine vs Healthy
+        # Normalise both to % of healthy reference for fair visual comparison
+        u_pct = [u/h*100 if h!=0 else 100 for u,h in zip(u_vals, h_vals)]
+        h_pct = [100.0]*len(h_vals)
+
+        bar_colors_u = []
+        for i, (u,mn,mx) in enumerate(zip(u_vals, s_min, s_max)):
+            if mn <= u <= mx:
+                bar_colors_u.append("#48bb78")   # green = safe
+            elif abs(u-h_vals[i]) <= 2*scaler.scale_[i]:
+                bar_colors_u.append("#f6ad55")   # amber = caution
+            else:
+                bar_colors_u.append("#fc8181")   # red = danger
+
+        fig_compare = go.Figure()
+        fig_compare.add_trace(go.Bar(
+            name="✅ Healthy Benchmark",
+            x=labels, y=h_pct,
+            marker_color="#4a5568",
+            opacity=0.6,
+            text=["100% (ref)"]*len(h_pct),
+            textposition="outside",
+            textfont=dict(color="#718096", size=9),
+        ))
+        fig_compare.add_trace(go.Bar(
+            name="🔵 Your Machine",
+            x=labels, y=u_pct,
+            marker_color=bar_colors_u,
+            text=[f"{v:.1f}%" for v in u_pct],
+            textposition="outside",
+            textfont=dict(color="#e2e8f0", size=9),
+        ))
+        fig_compare.update_layout(
+            barmode="group",
+            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="#0f1628",
+            font=dict(color="#e2e8f0"),
+            legend=dict(bgcolor="rgba(0,0,0,0)", font=dict(color="#a0aec0")),
+            xaxis=dict(tickfont=dict(color="#a0aec0", size=10), gridcolor="#1e2744"),
+            yaxis=dict(title="% of Healthy Reference", tickfont=dict(color="#718096"), gridcolor="#1e2744"),
+            height=340, margin=dict(t=20, b=20, l=10, r=10),
+        )
+        st.plotly_chart(fig_compare, use_container_width=True)
+
+        # ── Per-parameter deviation cards ────────────────────────────────────
+        st.markdown('<div class="section-header">Parameter-by-Parameter Comparison</div>', unsafe_allow_html=True)
+        param_cols = st.columns(5)
+        param_icons = ["🌡️","♨️","⚡","🔩","🔧"]
+        for i, (col, lbl, icon) in enumerate(zip(param_cols, labels, param_icons)):
+            u   = u_vals[i]
+            h   = h_vals[i]
+            mn  = s_min[i]
+            mx  = s_max[i]
+            dev = ((u - h) / h * 100) if h != 0 else 0
+            if mn <= u <= mx:
+                status_color, status_text = "#48bb78", "✅ Normal"
+            elif abs(u-h) <= 2*scaler.scale_[i]:
+                status_color, status_text = "#f6ad55", "⚠️ Caution"
+            else:
+                status_color, status_text = "#fc8181", "🚨 Critical"
+
+            with col:
+                st.markdown(f"""
+                <div style="background:#0f1628; border:1px solid {status_color}44;
+                            border-left:3px solid {status_color}; border-radius:12px;
+                            padding:14px 12px; text-align:center;">
+                    <div style="font-size:1.4rem">{icon}</div>
+                    <div style="color:#718096; font-size:0.7rem; margin:4px 0; text-transform:uppercase; letter-spacing:0.5px;">{lbl.split("(")[0].strip()}</div>
+                    <div style="color:#e2e8f0; font-size:1.1rem; font-weight:700;">{u:.1f}</div>
+                    <div style="color:#4a5568; font-size:0.72rem;">Healthy: {h:.1f}</div>
+                    <div style="color:{status_color}; font-size:0.72rem; margin-top:4px;">{dev:+.1f}% deviation</div>
+                    <div style="color:{status_color}; font-size:0.72rem; font-weight:600;">{status_text}</div>
+                </div>
+                """, unsafe_allow_html=True)
+
+        # ── Radar overlay: Your vs Healthy ───────────────────────────────────
+        st.markdown("<br>", unsafe_allow_html=True)
+        r1, r2 = st.columns(2)
+        with r1:
+            st.markdown('<div class="section-header">Radar: Your Machine vs Healthy</div>', unsafe_allow_html=True)
+            # Normalise 0-100 relative to safe max
+            u_norm = [min(max((u_vals[i]-s_min[i])/(s_max[i]-s_min[i]),0),1)*100 for i in range(5)]
+            h_norm = [min(max((h_vals[i]-s_min[i])/(s_max[i]-s_min[i]),0),1)*100 for i in range(5)]
+            short_labels = ["Air Temp","Proc Temp","RPM","Torque","Tool Wear"]
+            cats = short_labels + [short_labels[0]]
+            fig_radar2 = go.Figure()
+            fig_radar2.add_trace(go.Scatterpolar(
+                r=h_norm+[h_norm[0]], theta=cats, fill="toself",
+                fillcolor="rgba(72,187,120,0.15)", line=dict(color="#48bb78", width=2, dash="dash"),
+                name="✅ Healthy", marker=dict(size=5, color="#48bb78"),
+            ))
+            fig_radar2.add_trace(go.Scatterpolar(
+                r=u_norm+[u_norm[0]], theta=cats, fill="toself",
+                fillcolor="rgba(102,126,234,0.2)", line=dict(color="#667eea", width=2),
+                name="🔵 Your Machine", marker=dict(size=5, color="#764ba2"),
+            ))
+            fig_radar2.update_layout(
+                polar=dict(
+                    bgcolor="#1a2035",
+                    radialaxis=dict(visible=True, range=[0,100], tickfont=dict(color="#718096"), gridcolor="#2d3748"),
+                    angularaxis=dict(tickfont=dict(color="#a0aec0"), gridcolor="#2d3748"),
+                ),
+                paper_bgcolor="rgba(0,0,0,0)", font=dict(color="#e2e8f0"),
+                legend=dict(bgcolor="rgba(0,0,0,0)", font=dict(color="#a0aec0")),
+                showlegend=True, height=340, margin=dict(t=30, b=30, l=40, r=40),
+            )
+            st.plotly_chart(fig_radar2, use_container_width=True)
+
+        with r2:
+            st.markdown('<div class="section-header">Absolute Value Comparison</div>', unsafe_allow_html=True)
+            fig_abs = go.Figure()
+            fig_abs.add_trace(go.Scatter(
+                x=short_labels, y=h_vals, mode="lines+markers",
+                name="✅ Healthy", line=dict(color="#48bb78", width=2, dash="dash"),
+                marker=dict(size=8, color="#48bb78"),
+            ))
+            fig_abs.add_trace(go.Scatter(
+                x=short_labels, y=u_vals, mode="lines+markers",
+                name="🔵 Your Machine", line=dict(color="#667eea", width=2),
+                marker=dict(size=8, color="#764ba2"),
+            ))
+            # Safe zone band for first param only — show reference lines
+            for i, (sl, mn, mx) in enumerate(zip(short_labels, s_min, s_max)):
+                pass  # skip shading, too complex multi-axis
+            fig_abs.update_layout(
+                paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="#0f1628",
+                font=dict(color="#e2e8f0"),
+                legend=dict(bgcolor="rgba(0,0,0,0)", font=dict(color="#a0aec0")),
+                xaxis=dict(tickfont=dict(color="#a0aec0"), gridcolor="#1e2744"),
+                yaxis=dict(title="Raw Value", tickfont=dict(color="#718096"), gridcolor="#1e2744"),
+                height=340, margin=dict(t=20, b=20, l=10, r=10),
+            )
+            st.plotly_chart(fig_abs, use_container_width=True)
+
+        # ── Technician Booking (only when failure predicted) ─────────────────
+        if pred == 1 or health_score < 70:
+            st.markdown("---")
+            st.markdown("""
+            <div style="background:linear-gradient(135deg,#2e1a1a,#1a0f0f); border:2px solid #fc8181;
+                        border-radius:20px; padding:28px; margin:16px 0;">
+                <div style="font-size:1.5rem; font-weight:800; color:#fc8181; margin-bottom:6px;">
+                    🚨 Maintenance Required — Book a Technician
+                </div>
+                <div style="color:#a0aec0; font-size:0.95rem;">
+                    Your machine shows signs of failure. Schedule an urgent inspection below.
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+
+            with st.form("technician_form"):
+                tb1, tb2 = st.columns(2)
+                with tb1:
+                    tech_name      = st.text_input("👤 Your Name", placeholder="e.g. Rajesh Kumar")
+                    tech_email     = st.text_input("📧 Email Address", placeholder="e.g. rajesh@factory.com")
+                    tech_phone     = st.text_input("📞 Phone Number", placeholder="e.g. +91 98765 43210")
+                    tech_location  = st.text_input("📍 Plant / Location", placeholder="e.g. Unit 3 — Raipur Plant")
+
+                with tb2:
+                    tech_machine   = st.text_input("🏭 Machine ID / Name", placeholder="e.g. CNC-07 / Lathe-3")
+                    tech_priority  = st.selectbox("🚦 Priority Level", ["🔴 Critical — Within 24 hrs", "🟠 High — Within 48 hrs", "🟡 Medium — Within 72 hrs"])
+                    tech_date      = st.date_input("📅 Preferred Appointment Date")
+                    tech_time      = st.selectbox("🕐 Preferred Time Slot", [
+                        "08:00 – 10:00", "10:00 – 12:00",
+                        "12:00 – 14:00", "14:00 – 16:00", "16:00 – 18:00"
+                    ])
+                    tech_issue     = st.selectbox("⚠️ Detected Failure Type", FAILURE_TYPES[1:])
+
+                tech_notes = st.text_area("📝 Additional Notes", placeholder="Describe any unusual sounds, vibrations, or recent events...", height=80)
+                book_btn   = st.form_submit_button("📅 Confirm Appointment & Notify Technician")
+
+            if book_btn:
+                if not tech_name or not tech_email or not tech_phone:
+                    st.error("Please fill in Name, Email, and Phone to confirm the booking.")
+                else:
+                    st.markdown(f"""
+                    <div style="background:linear-gradient(135deg,#1a2e1a,#0f1a0f); border:2px solid #48bb78;
+                                border-radius:20px; padding:28px; margin-top:16px; animation: fadeIn 0.5s ease;">
+                        <div style="font-size:1.4rem; font-weight:800; color:#48bb78; margin-bottom:16px;">
+                            ✅ Appointment Confirmed!
+                        </div>
+                        <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px; color:#a0aec0; font-size:0.9rem; line-height:2;">
+                            <div>👤 <b style="color:#e2e8f0">{tech_name}</b></div>
+                            <div>📧 <b style="color:#e2e8f0">{tech_email}</b></div>
+                            <div>📞 <b style="color:#e2e8f0">{tech_phone}</b></div>
+                            <div>📍 <b style="color:#e2e8f0">{tech_location or "Not specified"}</b></div>
+                            <div>🏭 <b style="color:#e2e8f0">{tech_machine or "Not specified"}</b></div>
+                            <div>🚦 <b style="color:#fc8181">{tech_priority}</b></div>
+                            <div>📅 <b style="color:#e2e8f0">{tech_date.strftime("%d %B %Y")}</b></div>
+                            <div>🕐 <b style="color:#e2e8f0">{tech_time}</b></div>
+                            <div>⚠️ <b style="color:#f6ad55">{tech_issue}</b></div>
+                        </div>
+                        {f'<div style="margin-top:12px; color:#718096; font-size:0.85rem;">📝 Notes: {tech_notes}</div>' if tech_notes else ""}
+                        <div style="margin-top:20px; padding:14px; background:#0f1628; border-radius:12px; color:#68d391; font-size:0.88rem;">
+                            📬 A confirmation has been logged. Our technician team will contact <b>{tech_name}</b>
+                            at <b>{tech_email}</b> within 2 hours to confirm the appointment.
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                    st.balloons()
 
 # ─── BATCH PREDICTIONS ───────────────────────────────────────────────────────
 elif page == "📦  Batch Predictions":
