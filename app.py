@@ -199,16 +199,24 @@ FEATURE_NAMES = ["Air temperature", "Process temperature",
                  "Rotational speed", "Torque", "Tool wear"]
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
-def encode_machine_type(mt: str) -> list[int]:
-    """One-hot encode Machine Type → [type_H, type_L, type_M]"""
-    mapping = {"H": [1, 0, 0], "L": [0, 1, 0], "M": [0, 0, 1]}
-    return mapping.get(mt, [0, 0, 1])
+# Model feature order (from stored feature_names): Type, Air temperature,
+# Process temperature, Rotational speed, Torque, Tool wear  (6 total)
+# • Type is label-encoded: H=0, L=1, M=2  (int, not scaled)
+# • The 5 numerical columns are passed through the StandardScaler
+
+TYPE_ENCODING = {"H": 0, "L": 1, "M": 2}
+
+def encode_machine_type(mt: str) -> int:
+    """Label-encode Machine Type: H→0, L→1, M→2"""
+    return TYPE_ENCODING.get(mt.upper().strip(), 2)
 
 def build_feature_row(machine_type, air_temp, proc_temp, rpm, torque, tool_wear):
+    # Scale the 5 numerical features using the fitted scaler
     numerical = np.array([[air_temp, proc_temp, rpm, torque, tool_wear]], dtype=float)
-    num_scaled = scaler.transform(numerical)
-    type_encoded = np.array([encode_machine_type(machine_type)])
-    return np.hstack([num_scaled, type_encoded])
+    num_scaled = scaler.transform(numerical)          # shape (1, 5)
+    # Prepend the integer-encoded Type as column 0
+    type_val = np.array([[encode_machine_type(machine_type)]], dtype=float)
+    return np.hstack([type_val, num_scaled])          # shape (1, 6)
 
 def predict_single(machine_type, air_temp, proc_temp, rpm, torque, tool_wear):
     x = build_feature_row(machine_type, air_temp, proc_temp, rpm, torque, tool_wear)
