@@ -995,7 +995,7 @@ elif page == "ℹ️  About":
     st.markdown("## ℹ️ About PredictIQ")
     st.markdown("---")
 
-    st.markdown(""")
+    st.markdown("""
     ### 🔧 Project Overview
     **PredictIQ** is an AI-powered predictive maintenance dashboard designed to help industrial operators
     monitor machine health in real-time using sensor data.
@@ -1017,3 +1017,17 @@ elif page == "ℹ️  About":
     reflecting real predictive maintenance data encountered in industry.
 
     **Target variable:** Machine failure (binary: 0 = Normal, 1 = Failure)
+
+    ---
+    ### 🚀 Running Locally
+    ```bash
+    pip install -r requirements.txt
+    streamlit run app.py
+    ```
+
+    ---
+    ### ☁️ Deployment
+    - **Streamlit Cloud**: Push to GitHub → deploy via share.streamlit.io
+    - **HuggingFace Spaces**: Use Streamlit SDK in Space settings
+    - **Render**: Add `start_command = streamlit run app.py` in render.yaml
+    """)
