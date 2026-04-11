@@ -995,7 +995,7 @@ elif page == "ℹ️  About":
     st.markdown("## ℹ️ About PredictIQ")
     st.markdown("---")
 
-    st.markdown("""
+    st.markdown(""")
     ### 🔧 Project Overview
     **PredictIQ** is an AI-powered predictive maintenance dashboard designed to help industrial operators
     monitor machine health in real-time using sensor data.
